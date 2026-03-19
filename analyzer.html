@@ -562,7 +562,7 @@
 
 <script>
 // ==================== CONFIG ====================
-const API_KEY = 'J92WVBFVG0Y6LRVA';
+const API_KEY = '6JD9FQM793QSVWS9';
 const BASE = 'https://www.alphavantage.co/query';
 
 // ==================== STATE ====================
@@ -584,27 +584,58 @@ function switchTab(tab) {
 }
 
 // ==================== API ====================
+// ── API 캐시 (분당 한도 절약) ──
+const _apiCache = {};
+const _CACHE_MS = 30 * 60 * 1000; // 30분 캐시
+
+// API 호출 간 딜레이 (분당 5회 = 12초 간격이 안전)
+let _lastApiCall = 0;
+async function _apiDelay() {
+    const MIN_INTERVAL = 13000; // 13초 간격 (분당 4.6회로 여유 있게)
+    const now = Date.now();
+    const wait = MIN_INTERVAL - (now - _lastApiCall);
+    if (wait > 0) {
+        console.log(`[API] ${(wait/1000).toFixed(1)}초 대기 중...`);
+        await new Promise(r => setTimeout(r, wait));
+    }
+    _lastApiCall = Date.now();
+}
+
 async function apiFetch(params) {
+    // 캐시 키 생성
+    const cacheKey = JSON.stringify(params);
+    const cached = _apiCache[cacheKey];
+    if (cached && Date.now() - cached.ts < _CACHE_MS) {
+        console.log('[Cache HIT]', params.function, params.symbol || '');
+        return cached.data;
+    }
+
+    // 딜레이 적용 후 호출
+    await _apiDelay();
+
     const url = `${BASE}?${new URLSearchParams({...params, apikey: API_KEY})}`;
     const res = await fetch(url);
     const data = await res.json();
 
-    // Note: 분당 호출 한도 (무료 5회/분)
-    if (data['Note']) throw new Error('잠깐! 분당 요청 한도 초과 (5회/분). 1분 후 다시 시도해주세요.');
+    // Note: 분당 호출 한도 초과
+    if (data['Note']) throw new Error('분당 요청 한도 초과 (5회/분). 잠시 후 자동 재시도합니다.');
 
-    // Error Message: 잘못된 티커 등
+    // Error Message: 잘못된 티커
     if (data['Error Message']) throw new Error('티커를 찾을 수 없습니다: ' + (params.symbol || ''));
 
-    // Information: 진짜 한도 초과인 경우만 에러, 나머지는 계속 진행
+    // Information: 진짜 한도 초과만 에러
     if (data['Information']) {
         const info = data['Information'];
         const isLimit = info.toLowerCase().includes('api call frequency')
                      || info.toLowerCase().includes('25 requests per day')
                      || info.toLowerCase().includes('premium endpoint');
         if (isLimit) throw new Error('API 일일 한도 초과. 내일 다시 이용하거나 새 키를 발급해주세요.');
-        console.warn('[API Info]', info); // 한도 아닌 Info는 콘솔만
+        console.warn('[API Info]', info);
     }
 
+    // 캐시 저장
+    _apiCache[cacheKey] = { data, ts: Date.now() };
+    console.log('[Cache SET]', params.function, params.symbol || '');
     return data;
 }
 
@@ -1074,17 +1105,30 @@ async function handleSearch() {
 
     errorMsg.style.display = 'none';
     searchBtn.disabled = true;
-    searchBtn.innerHTML = '<span class="spinner"></span> 분석중...';
     document.getElementById('resultArea').style.display = 'none';
-
-    // API 상태 표시
     setApiStatus('loading');
+
+    // 진행 상황 표시
+    const steps = [
+        '1/4 현재가 조회 중...',
+        '2/4 기업 정보 조회 중...',
+        '3/4 뉴스 조회 중...',
+        '4/4 이동평균 계산 중...',
+    ];
+    let stepIdx = 0;
+    searchBtn.innerHTML = `<span class="spinner"></span> ${steps[0]}`;
+    const stepTimer = setInterval(() => {
+        stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+        searchBtn.innerHTML = `<span class="spinner"></span> ${steps[stepIdx]}`;
+    }, 14000); // 13초 딜레이에 맞춰
 
     try {
         currentStock = await fetchStockData(ticker);
+        clearInterval(stepTimer);
         renderResult(currentStock);
         setApiStatus('ok');
     } catch(err) {
+        clearInterval(stepTimer);
         showError(err.message);
         setApiStatus('error');
         document.getElementById('emptyState').style.display = 'block';
